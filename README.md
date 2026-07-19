@@ -75,7 +75,11 @@ cp .env.example .env
 ### 3. 安装依赖
 
 ```bash
+# 核心依赖
 pip install -r requirements.txt
+
+# 开发依赖（含测试/压测/评测）
+pip install -r requirements-dev.txt
 ```
 
 ### 4. 下载精排模型
