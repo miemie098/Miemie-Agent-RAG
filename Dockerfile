@@ -1,23 +1,34 @@
-# ⚡ 终极修复：直接调用本地健康的 v1 镜像，实现 0 网络依赖构建
-FROM miemie-rag-app:v1
+# Miemie-Agent-RAG Dockerfile
+# ============================================================
+# 构建:  docker build -t miemie-rag-app .
+# 运行:  docker run -p 8000:8000 --env-file .env miemie-rag-app
+# ============================================================
 
-# 设置容器内的当前工作目录
+FROM python:3.10-slim
+
+# 设置工作目录
 WORKDIR /app
 
-# ⚡ 核心修复：彻底去掉已经挂掉的中科大换源逻辑，也不再重复安装 gcc/g++（底座里早已具备）
-# 直接进行全量 Python 资产同步即可
+# --- 系统依赖 ---
+# libgomp1: torch 运行所需
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Python 依赖层 (利用 Docker 缓存) ---
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# --- 项目代码 ---
 COPY . .
 
-# ... 前面的代码保持不动 ...
-
-# ⚡ 核心提效：注入国内官方 HuggingFace 镜像源加速通道，将几小时的下载压缩至 30 秒以内！
-ENV HF_ENDPOINT=https://hf-mirror.com
-
-# ⚡ 模型固件预载（因为加了 --network=host，这里会完美共享宿主机的梯子直接秒速固化）
+# --- 预下载 Embedding 模型 (可选，加速首次启动) ---
+# 如需使用 HuggingFace 镜像加速，取消下一行注释:
+# ENV HF_ENDPOINT=https://hf-mirror.com
 RUN python -c "from langchain_huggingface import HuggingFaceEmbeddings; HuggingFaceEmbeddings(model_name='sentence-transformers/all-mpnet-base-v2')"
 
-# 暴露 FastAPI 默认服务的 8000 端口
+# --- 运行时配置 ---
 EXPOSE 8000
 
-# 容器启动命令
+# 启动 FastAPI 服务
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -112,6 +112,16 @@ python app/main.py
 python test_stream.py
 ```
 
+### Docker 部署 (可选)
+
+```bash
+# 构建镜像
+docker build -t miemie-rag-app .
+
+# 启动容器 (通过 --env-file 注入 API Key)
+docker run -p 8000:8000 --env-file .env miemie-rag-app
+```
+
 ## API 文档
 
 ### POST /chat/stream
