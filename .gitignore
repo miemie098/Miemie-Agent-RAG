@@ -40,6 +40,11 @@ service-account.json
 .DS_Store
 
 # ======================
+# Claude Code config
+# ======================
+.claude/
+
+# ======================
 # Project-specific
 # ======================
 milvus.db/

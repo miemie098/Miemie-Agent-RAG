@@ -45,18 +45,26 @@ spec:
             secretKeyRef:
               name: miemie-rag-secrets
               key: DEEPSEEK_API_KEY
+        # 资源限制
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
         # 健康检查
         livenessProbe:
           httpGet:
-            path: /docs
+            path: /health
             port: 8000
-          initialDelaySeconds: 30
+          initialDelaySeconds: 60
           periodSeconds: 30
         readinessProbe:
           httpGet:
-            path: /docs
+            path: /health
             port: 8000
-          initialDelaySeconds: 10
+          initialDelaySeconds: 30
           periodSeconds: 10
 
 ---

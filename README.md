@@ -61,7 +61,7 @@ flowchart LR
 ### 1. 克隆项目
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/miemie098/Miemie-Agent-RAG.git
 cd Miemie-Agent-RAG
 ```
 
