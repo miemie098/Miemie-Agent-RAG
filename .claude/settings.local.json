@@ -5,7 +5,10 @@
       "Bash(git add *)",
       "Bash(git commit -m 'init: Miemie-Agent-RAG 混合检索RAG系统 *)",
       "Bash(git config *)",
-      "Bash(git commit -m 'fix: 消除硬编码路径，精排模型路径改为可配置 *)"
+      "Bash(git commit -m 'fix: 消除硬编码路径，精排模型路径改为可配置 *)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m pytest tests/ -v --tb=short -x)",
+      "Bash(git commit -m 'feat: 添加单元测试 + LLM 懒加载重构 *)"
     ]
   }
 }

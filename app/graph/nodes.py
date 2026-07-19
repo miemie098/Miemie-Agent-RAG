@@ -12,13 +12,26 @@ class GraphState(TypedDict):
     answer: str
 
 
-# 核心优化1：单例复用，将 LLM 客户端初始化提到全局，高并发下复用底层的连接池
-# 避免每个并发请求进来都重复执行 os.getenv 和实例化对象
-_global_llm_instance = ChatOpenAI(
-    model='deepseek-chat',
-    openai_api_key=os.getenv("DEEPSEEK_API_KEY"),
-    openai_api_base='https://api.deepseek.com'
-)
+# LLM 客户端懒加载单例，避免模块导入时强依赖环境变量
+_global_llm_instance = None
+
+
+def _get_llm():
+    """延迟初始化 LLM 客户端，高并发下复用底层连接池"""
+    global _global_llm_instance
+    if _global_llm_instance is None:
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "未检测到 DEEPSEEK_API_KEY 环境变量。"
+                "请在项目根目录的 .env 文件中配置 API Key。"
+            )
+        _global_llm_instance = ChatOpenAI(
+            model="deepseek-chat",
+            openai_api_key=api_key,
+            openai_api_base="https://api.deepseek.com",
+        )
+    return _global_llm_instance
 
 
 def retrieve_node(state: GraphState):
@@ -35,7 +48,7 @@ def generate_node(state: GraphState):
 
     # 核心优化2：加入大厂级别的异常防御性捕获，防止三方网络 API 故障拖垮整站
     try:
-        response = _global_llm_instance.invoke(prompt)
+        response = _get_llm().invoke(prompt)
         return {"answer": response.content}
     except Exception as e:
         print(f"[❌ 生产级报错告警] DeepSeek API 调用发生异常: {str(e)}")
@@ -48,5 +61,5 @@ async def generate_node_stream(state: GraphState):
     prompt = f"基于以下知识回答问题:\n{state['context']}\n问题: {state['question']}"
 
     # 使用 astream 处理流式数据
-    async for chunk in _global_llm_instance.astream(prompt):
+    async for chunk in _get_llm().astream(prompt):
         yield {"answer": chunk.content}
