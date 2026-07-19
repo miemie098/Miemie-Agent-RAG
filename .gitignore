@@ -1,0 +1,66 @@
+# ======================
+# Python
+# ======================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+*.whl
+
+# ======================
+# Virtual environments
+# ======================
+venv/
+.venv/
+env/
+.env
+
+# ======================
+# Secrets & environment
+# ======================
+.env
+*.pem
+*.key
+credentials.json
+service-account.json
+
+# ======================
+# IDE / Editor
+# ======================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ======================
+# Project-specific
+# ======================
+milvus.db/
+models_cache/
+models/
+*.db
+*.db-journal
+*.db-wal
+
+# ======================
+# Jupyter
+# ======================
+.ipynb_checkpoints/
+
+# ======================
+# Logs
+# ======================
+*.log
+logs/
+
+# ======================
+# OS
+# ======================
+Thumbs.db
