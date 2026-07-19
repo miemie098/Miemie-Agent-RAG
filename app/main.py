@@ -56,13 +56,18 @@ async def root_to_docs():
     return RedirectResponse(url="/docs")
 
 
-@app.post("/chat/stream", summary="RAG 流式智能问答接口",tags=["Miemie 核心对话 Agent 模块"])
+@app.post("/chat/stream", summary="RAG 流式智能问答接口", tags=["Miemie 核心对话 Agent 模块"])
 async def chat_stream_endpoint(request: ChatRequest):
     async def event_generator():
-        # 这里使用 astream 进行流式处理
+        prev_len = 0
         async for chunk in rag_workflow.astream({"question": request.question}):
-            if 'generate' in chunk and 'answer' in chunk['generate']:
-                yield f"data: {json.dumps({'answer': chunk['generate']['answer']},ensure_ascii=False)}\n\n"
+            if "generate" in chunk and "answer" in chunk["generate"]:
+                full = chunk["generate"]["answer"]
+                # 只发送增量部分（新增的 token），而非完整累积文本
+                delta = full[prev_len:]
+                prev_len = len(full)
+                if delta:
+                    yield f"data: {json.dumps({'answer': delta}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

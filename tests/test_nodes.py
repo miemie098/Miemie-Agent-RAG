@@ -1,7 +1,7 @@
 # tests/test_nodes.py — 图节点逻辑单元测试
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 from app.graph.nodes import GraphState
 
@@ -102,3 +102,70 @@ class TestGenerateNode:
 
         assert "answer" in result
         assert "系统提示" in result["answer"]
+
+
+class TestGenerateNodeStream:
+    """流式生成节点 — Mock LLM 流式调用"""
+
+    @staticmethod
+    async def _collect_generator(gen):
+        """收集 async generator 的所有 yield 值"""
+        results = []
+        async for item in gen:
+            results.append(item)
+        return results
+
+    @patch("app.graph.nodes._get_llm")
+    @pytest.mark.asyncio
+    async def test_stream_accumulates_tokens(self, mock_get_llm):
+        from app.graph.nodes import generate_node_stream
+
+        # Mock astream：模拟逐 token 返回
+        async def mock_astream(prompt):
+            for token in ["你好", "，", "世界", "！"]:
+                chunk = MagicMock()
+                chunk.content = token
+                yield chunk
+
+        mock_llm = MagicMock()
+        mock_llm.astream = mock_astream
+        mock_get_llm.return_value = mock_llm
+
+        state: GraphState = {
+            "question": "测试问题",
+            "context": "测试上下文",
+            "answer": "",
+        }
+        results = await self._collect_generator(generate_node_stream(state))
+
+        # 每次 yield 是累积的完整文本
+        assert results[0]["answer"] == "你好"
+        assert results[1]["answer"] == "你好，"
+        assert results[2]["answer"] == "你好，世界"
+        assert results[3]["answer"] == "你好，世界！"
+        assert len(results) == 4
+
+    @patch("app.graph.nodes._get_llm")
+    @pytest.mark.asyncio
+    async def test_stream_graceful_degradation(self, mock_get_llm):
+        from app.graph.nodes import generate_node_stream
+
+        async def mock_astream_error(prompt):
+            chunk = MagicMock()
+            chunk.content = "部分输出"
+            yield chunk
+            raise Exception("连接中断")
+
+        mock_llm = MagicMock()
+        mock_llm.astream = mock_astream_error
+        mock_get_llm.return_value = mock_llm
+
+        state: GraphState = {
+            "question": "测试",
+            "context": "测试上下文",
+            "answer": "",
+        }
+        results = await self._collect_generator(generate_node_stream(state))
+
+        # 降级消息应作为最后一个 yield 返回
+        assert "系统提示" in results[-1]["answer"]

@@ -57,9 +57,18 @@ def generate_node(state: GraphState):
 
 
 async def generate_node_stream(state: GraphState):
-    """节点2：异步流式生成器"""
+    """节点2：异步流式生成器，逐 token 累积输出。
+
+    - astream 模式下，调用方通过增量方式获取每个 token
+    - ainvoke 模式下，LangGraph 取最后一次 yield 的完整累积答案
+    """
     prompt = f"基于以下知识回答问题:\n{state['context']}\n问题: {state['question']}"
 
-    # 使用 astream 处理流式数据
-    async for chunk in _get_llm().astream(prompt):
-        yield {"answer": chunk.content}
+    try:
+        full_answer = ""
+        async for chunk in _get_llm().astream(prompt):
+            full_answer += chunk.content
+            yield {"answer": full_answer}
+    except Exception as e:
+        print(f"[❌ 生产级报错告警] DeepSeek API 流式调用异常: {str(e)}")
+        yield {"answer": "【系统提示】由于当前大模型网络链路抖动，知识大脑暂时无法响应，请稍后再试。"}
