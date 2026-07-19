@@ -38,12 +38,13 @@ class MiemieMilvusRetriever:
         self.bm25 = BM25Okapi(tokenized_corpus)
         print(f"====== [Miemie-RAG 算法激活] BM25 索引构建完毕，共加载 {len(self.corpus)} 条底座语料。 ======")
 
-        # 4. ⚡ 缝合天花板重排模块：BGE-Reranker-Large (精排轨道)
-        print("====== [Miemie-RAG 算法激活] 正在装载大厂标配 BAAI/bge-reranker-large 精排核心... ======")
-        LOCAL_RERANKER_PATH = r"D:\models_cache\Xorbits\bge-reranker-large"
-        self.rerank_tokenizer = AutoTokenizer.from_pretrained(LOCAL_RERANKER_PATH)
-        self.rerank_model = AutoModelForSequenceClassification.from_pretrained(LOCAL_RERANKER_PATH)
-        self.rerank_model.eval()  # 开启推理模式
+        # 4. 精排模块：BGE-Reranker-Large (Cross-Encoder)
+        # 优先使用环境变量指定的本地路径，否则从 HuggingFace Hub 自动下载
+        reranker_source = os.getenv("RERANKER_MODEL_PATH", "BAAI/bge-reranker-large")
+        print(f"====== [Miemie-RAG 算法激活] 正在装载精排模型: {reranker_source} ======")
+        self.rerank_tokenizer = AutoTokenizer.from_pretrained(reranker_source)
+        self.rerank_model = AutoModelForSequenceClassification.from_pretrained(reranker_source)
+        self.rerank_model.eval()
 
     def _rrf_fusion(self, vector_results: list, bm25_results: list, k: int = 60) -> list:
         """纯手工打造工业级 RRF 混合检索名次融合算法"""
