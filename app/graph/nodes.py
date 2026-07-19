@@ -1,23 +1,30 @@
 # Miemie-Agent-RAG/app/graph/nodes.py
+import logging
+import os
 from typing import TypedDict
+
 from app.services.retriever import get_milvus_retriever
 from langchain_openai import ChatOpenAI
-import os
+
+logger = logging.getLogger("miemie-rag.nodes")
+
+# 对话历史最多保留的轮数
+MAX_HISTORY_TURNS = 5
 
 
-# 定义系统的状态流转数据结构
 class GraphState(TypedDict):
     question: str
     context: str
     answer: str
+    messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
 
 
-# LLM 客户端懒加载单例，避免模块导入时强依赖环境变量
+# LLM 客户端懒加载单例
 _global_llm_instance = None
 
 
 def _get_llm():
-    """延迟初始化 LLM 客户端，高并发下复用底层连接池"""
+    """延迟初始化 LLM 客户端"""
     global _global_llm_instance
     if _global_llm_instance is None:
         api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -34,8 +41,26 @@ def _get_llm():
     return _global_llm_instance
 
 
+def _build_messages(state: GraphState, system_prompt: str) -> list:
+    """
+    拼接系统指令 + 历史对话 + 当前问题，构建 LLM 输入消息列表。
+    这是多轮对话能力的核心入口：所有生成节点都通过此函数统一构建 prompt。
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # 裁剪最近 N 轮历史，防止上下文溢出
+    history = state.get("messages", []) or []
+    recent = history[-(MAX_HISTORY_TURNS * 2):]  # 每轮 = user + assistant
+    for msg in recent:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+
+    # 当前问题
+    messages.append({"role": "user", "content": state["question"]})
+    return messages
+
+
 def retrieve_node(state: GraphState):
-    """节点1：从 Milvus 检索相关知识"""
+    """从 Milvus 检索相关知识"""
     retriever = get_milvus_retriever()
     docs = retriever.invoke(state["question"])
     context = "\n".join([doc.page_content for doc in docs])
@@ -43,32 +68,40 @@ def retrieve_node(state: GraphState):
 
 
 def generate_node(state: GraphState):
-    """节点2：调用 DeepSeek 生成答案"""
-    prompt = f"基于以下知识回答问题:\n{state['context']}\n问题: {state['question']}"
+    """调用 DeepSeek 生成答案（同步，完整返回）"""
+    system_prompt = (
+        "你是一个知识助手。请基于以下参考资料回答用户问题。"
+        "如果参考资料不足以回答，请如实说明。\n\n"
+        f"参考资料:\n{state['context']}"
+    )
+    llm_messages = _build_messages(state, system_prompt)
 
-    # 核心优化2：加入大厂级别的异常防御性捕获，防止三方网络 API 故障拖垮整站
     try:
-        response = _get_llm().invoke(prompt)
+        response = _get_llm().invoke(llm_messages)
         return {"answer": response.content}
     except Exception as e:
-        print(f"[❌ 生产级报错告警] DeepSeek API 调用发生异常: {str(e)}")
-        # 优雅降级返回，不让系统报 500 错误
-        return {"answer": "【系统提示】由于当前大模型网络链路抖动，知识大脑暂时无法响应，请稍后再试。"}
+        logger.error(f"DeepSeek API 调用异常: {e}")
+        return {"answer": "【系统提示】大模型服务暂时不可用，请稍后重试。"}
 
 
 async def generate_node_stream(state: GraphState):
-    """节点2：异步流式生成器，逐 token 累积输出。
-
-    - astream 模式下，调用方通过增量方式获取每个 token
-    - ainvoke 模式下，LangGraph 取最后一次 yield 的完整累积答案
     """
-    prompt = f"基于以下知识回答问题:\n{state['context']}\n问题: {state['question']}"
+    调用 DeepSeek 流式生成答案。
+    - astream 模式：调用方通过增量获取每个 token
+    - ainvoke 模式：LangGraph 取最后一次 yield 的累积结果
+    """
+    system_prompt = (
+        "你是一个知识助手。请基于以下参考资料回答用户问题。"
+        "如果参考资料不足以回答，请如实说明。\n\n"
+        f"参考资料:\n{state['context']}"
+    )
+    llm_messages = _build_messages(state, system_prompt)
 
     try:
         full_answer = ""
-        async for chunk in _get_llm().astream(prompt):
+        async for chunk in _get_llm().astream(llm_messages):
             full_answer += chunk.content
             yield {"answer": full_answer}
     except Exception as e:
-        print(f"[❌ 生产级报错告警] DeepSeek API 流式调用异常: {str(e)}")
-        yield {"answer": "【系统提示】由于当前大模型网络链路抖动，知识大脑暂时无法响应，请稍后再试。"}
+        logger.error(f"DeepSeek API 流式调用异常: {e}")
+        yield {"answer": "【系统提示】大模型服务暂时不可用，请稍后重试。"}

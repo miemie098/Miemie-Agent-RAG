@@ -1,6 +1,9 @@
 # Miemie-Agent-RAG/app/main.py
+import json
+import logging
 import os
 import sys
+
 import uvicorn
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -10,60 +13,94 @@ load_dotenv()
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse, StreamingResponse
-import json
 from app.graph.workflow import create_workflow
 from app.services.retriever import get_milvus_retriever
 
+# 日志配置
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("miemie-rag")
 
-# 1. 必须先定义生命周期函数，这样 FastAPI 实例化时才能找到它
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    question: str
+    messages: list[ChatMessage] | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 检查是否为 Uvicorn 重载主进程
     is_uvicorn_cmd = any("uvicorn" in arg.lower() for arg in sys.argv)
     is_reloader_main_process = is_uvicorn_cmd and os.getenv("UVICORN_LOOP") is None
 
     if not is_reloader_main_process:
-        print("\n=== [Miemie-RAG 预热激活] 正在独占装载 Embedding 模型与向量库句柄... ===")
+        logger.info("正在预热：加载 Embedding 模型与向量库...")
         get_milvus_retriever()
-        print("=== [Miemie-RAG 预热激活] 模型全重就绪！FastAPI 正式对外开放！ ===\n")
+        logger.info("预热完成，服务就绪")
     else:
-        print("[ℹ️ Uvicorn 提示] 主控重载监听器启动，跳过预热。")
+        logger.debug("Uvicorn reloader 主进程，跳过预热")
 
     yield
-    print("=== [Miemie-RAG] 服务正在安全关闭... ===")
+    logger.info("服务正在关闭...")
 
 
-# 2. 现在实例化 FastAPI，lifespan 已经定义好了
 app = FastAPI(
-    title="Miemie-Agent-RAG 生产级后端服务",
-    description="Based on FastAPI + LangGraph + Milvus + DeepSeek",
+    title="Miemie-Agent-RAG",
+    description="基于 LangGraph + Milvus + DeepSeek 的混合检索增强生成系统",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
-# 3. 初始化工作流实例
 rag_workflow = create_workflow()
 
 
-# 4. 定义数据模型
-class ChatRequest(BaseModel):
-    question: str
+# ── 路由 ──────────────────────────────────────────────
 
 
-# 5. 定义接口路由 (放在 app 实例化之后)
 @app.get("/", include_in_schema=False)
 async def root_to_docs():
     return RedirectResponse(url="/docs")
 
 
-@app.post("/chat/stream", summary="RAG 流式智能问答接口", tags=["Miemie 核心对话 Agent 模块"])
+@app.get("/health", summary="健康检查")
+async def health_check():
+    return {"status": "healthy"}
+
+
+@app.post("/chat", summary="RAG 问答接口（非流式）", tags=["Chat"])
+async def chat_endpoint(request: ChatRequest):
+    """非流式问答，返回完整答案。支持多轮对话。"""
+    state_input = {
+        "question": request.question,
+        "messages": [m.model_dump() for m in (request.messages or [])],
+        "context": "",
+        "answer": "",
+    }
+    result = await rag_workflow.ainvoke(state_input)
+    return {"answer": result.get("answer", "")}
+
+
+@app.post("/chat/stream", summary="RAG 流式问答接口（SSE）", tags=["Chat"])
 async def chat_stream_endpoint(request: ChatRequest):
+    """流式问答，SSE 协议逐 token 推送。支持多轮对话。"""
     async def event_generator():
+        state_input = {
+            "question": request.question,
+            "messages": [m.model_dump() for m in (request.messages or [])],
+            "context": "",
+            "answer": "",
+        }
         prev_len = 0
-        async for chunk in rag_workflow.astream({"question": request.question}):
+        async for chunk in rag_workflow.astream(state_input):
             if "generate" in chunk and "answer" in chunk["generate"]:
                 full = chunk["generate"]["answer"]
-                # 只发送增量部分（新增的 token），而非完整累积文本
                 delta = full[prev_len:]
                 prev_len = len(full)
                 if delta:
@@ -72,13 +109,13 @@ async def chat_stream_endpoint(request: ChatRequest):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-if __name__ == "__main__":
-    print("====== [系统启动] 正在以自定义配置启动 Uvicorn 服务器 ======")
-    uvicorn.run(
-        "app.main:app",         # 目标应用 (注意这里要用字符串格式，才能兼容 reload)
-        host="0.0.0.0",         # 绑定所有网卡，防止被本地防火墙/IPv6误杀
-        port=8000,              # 固定端口
-        timeout_keep_alive=60,  # ⚡ 核心修改：将 Keep-Alive 超时时间延长至 60 秒（甚至 120 秒）
-        reload=False            # 压测时强烈建议将 reload 设为 False，能大幅提升并发稳定性
-    )
 
+if __name__ == "__main__":
+    logger.info("正在以自定义配置启动 Uvicorn 服务器")
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        timeout_keep_alive=60,
+        reload=False,
+    )

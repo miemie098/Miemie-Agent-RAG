@@ -12,7 +12,8 @@
       "Bash(git commit -m 'fix: 清理 requirements.txt，从173个依赖精简到15个直接依赖 *)",
       "Bash(git commit -m 'fix: 重写 Dockerfile，修复不可构建问题 *)",
       "Bash(pip install *)",
-      "Bash(git commit -m 'feat: 实现真正的 token 级流式输出 *)"
+      "Bash(git commit -m 'feat: 实现真正的 token 级流式输出 *)",
+      "Bash(git commit -m 'refactor: 全面代码质量提升 *)"
     ]
   }
 }
