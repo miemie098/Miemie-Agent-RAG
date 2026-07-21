@@ -1,6 +1,6 @@
 # Miemie-Agent-RAG
 
-基于 **LangGraph + Milvus + DeepSeek** 的混合检索增强生成（RAG）系统。支持多路召回、RRF 融合与 Cross-Encoder 精排，面向高并发流式问答场景。
+基于 **LangGraph + Milvus + DeepSeek** 的混合检索增强生成（RAG）系统。支持多路召回、线性加权融合与 Cross-Encoder 精排，面向高并发流式问答场景。
 
 ## 架构概览
 
@@ -14,9 +14,9 @@ flowchart LR
     subgraph Retrieval[多阶段检索 Pipeline]
         Retrieve --> Dense[密集向量检索<br/>all-mpnet-base-v2]
         Retrieve --> BM25[BM25 稀疏检索]
-        Dense --> RRF[RRF 名次融合]
-        BM25 --> RRF
-        RRF --> Rerank[Cross-Encoder 精排<br/>bge-reranker-large]
+        Dense --> Fusion[线性加权融合<br/>α=0.5 等权]
+        BM25 --> Fusion
+        Fusion --> Rerank[Cross-Encoder 精排<br/>bge-reranker-large]
     end
 
     Rerank --> Context[Top-3 上下文]
@@ -30,7 +30,7 @@ flowchart LR
 | 特性 | 说明 |
 |---|---|
 | **混合检索** | 密集向量（语义匹配）+ BM25（关键词匹配）双路并行召回 |
-| **RRF 融合** | Reciprocal Rank Fusion 名次融合算法，合并两路结果 |
+| **线性加权融合** | Min-max 归一化 + 加权合并两路分数（α=0.5 等权，也可切回 RRF） |
 | **Cross-Encoder 精排** | BGE-Reranker-Large 对粗筛候选集做精确语义相关度打分 |
 | **流式输出** | SSE（Server-Sent Events）协议，token 级实时推送 |
 | **单例架构** | LLM 客户端与检索器全局复用，避免高并发下重复初始化 |
@@ -156,13 +156,19 @@ Miemie-Agent-RAG/
 │   │   ├── nodes.py            # LangGraph 节点：检索 + 生成
 │   │   └── workflow.py         # 状态图构建，retrieve → generate
 │   └── services/
-│       └── retriever.py        # 混合检索核心：Dense+BM25+RRF+Rerank
+│       └── retriever.py        # 混合检索核心：Dense+BM25+线性加权+Rerank
 ├── data/                       # 知识库 PDF 文档
 ├── tests/
-│   └── evaluate_report.py      # LLM-as-Judge 评测大盘
+│   ├── test_retriever.py       # 检索器与融合算法单元测试
+│   ├── test_nodes.py           # LangGraph 节点单元测试
+│   ├── test_workflow.py        # 工作流结构单元测试
+│   └── evaluate_report.py      # LLM-as-Judge 评测（支持融合对比）
 ├── ingest.py                   # 文档解析与向量化入库
 ├── download_models.py          # 预下载精排模型
+├── probe_network.py            # DeepSeek API 连通性探针
+├── test_stream.py              # 流式接口手动测试
 ├── locustfile.py               # Locust 压测脚本
+├── pyproject.toml              # pytest 配置
 ├── deployment.yaml             # K8s Deployment + Service
 ├── Dockerfile                  # 容器化构建
 ├── .env.example                # 环境变量模板
@@ -171,18 +177,24 @@ Miemie-Agent-RAG/
 
 ## 评测
 
-运行 LLM-as-Judge 评测：
+### 默认评测
 
 ```bash
 python tests/evaluate_report.py
 ```
 
+### 融合策略对比评测
+
+```bash
+python tests/evaluate_report.py --compare
+```
+
+对 RRF、Linear Weighted (α=0.3/0.5/0.7) 四种配置分别评测，输出逐样本得分对比、Bootstrap 95% CI、延迟统计及综合排名。
+
 评测维度：
 - 事实准确性
 - 方案完备性
 - 知识密度
-
-输出 Bootstrap 95% 置信区间下的平均得分，以及 P50/P99 延迟。
 
 ## 压测
 

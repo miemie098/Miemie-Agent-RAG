@@ -18,7 +18,6 @@ eggs/
 venv/
 .venv/
 env/
-.env
 
 # ======================
 # Secrets & environment
