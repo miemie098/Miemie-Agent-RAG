@@ -15,12 +15,14 @@ from app.graph.nodes import (
 logger = logging.getLogger("miemie-rag.workflow")
 
 
-def create_workflow(streaming: bool = True):
+def create_workflow(streaming: bool = True, checkpointer=None):
     """
     构建 LangGraph 检索-生成工作流。
 
     Args:
         streaming: True 使用流式生成节点，False 使用同步节点。
+        checkpointer: 可选，LangGraph Checkpointer 实例（如 SqliteSaver），
+                      用于跨请求持久化对话状态。传入后可通过 thread_id 恢复会话。
     """
     workflow = StateGraph(GraphState)
 
@@ -33,4 +35,4 @@ def create_workflow(streaming: bool = True):
     workflow.add_edge("retrieve", "generate")
     workflow.add_edge("generate", END)
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)

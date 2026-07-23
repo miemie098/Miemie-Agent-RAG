@@ -1,6 +1,7 @@
 # Miemie-Agent-RAG/app/services/retriever.py
 import logging
 import os
+import time
 
 from pymilvus import MilvusClient
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -68,14 +69,61 @@ class MiemieMilvusRetriever:
         self.bm25 = BM25Okapi(tokenized_corpus)
         logger.info("BM25 索引就绪，语料数: %d", len(self.corpus))
 
-        # Cross-Encoder 精排模型
+        # Cross-Encoder 精排模型（优先 ONNX Runtime INT8 > ONNX FP32 > PyTorch）
         reranker_source = os.getenv("RERANKER_MODEL_PATH", "BAAI/bge-reranker-large")
         logger.info("装载精排模型: %s", reranker_source)
         self.rerank_tokenizer = AutoTokenizer.from_pretrained(reranker_source)
-        self.rerank_model = AutoModelForSequenceClassification.from_pretrained(
-            reranker_source
-        )
-        self.rerank_model.eval()
+        self.rerank_model, self._reranker_backend = self._load_reranker(reranker_source)
+
+    @staticmethod
+    def _load_reranker(model_path: str):
+        """加载 Cross-Encoder 模型，按优先级 ONNX INT8 > ONNX FP32 > PyTorch。
+
+        Returns:
+            (model, backend_name) — backend_name in {"onnx_int8", "onnx_fp32", "pytorch"}
+        """
+        # ── Levels 3 & 2: ONNX Runtime ──
+        try:
+            import onnxruntime as ort
+
+            quant_dir = os.path.join(model_path, "onnx_quantized")
+            onnx_dir = os.path.join(model_path, "onnx")
+
+            sess_opt = ort.SessionOptions()
+            sess_opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_opt.intra_op_num_threads = os.cpu_count() or 4
+            sess_opt.enable_mem_pattern = True
+            sess_opt.enable_cpu_mem_arena = True
+
+            # 优先 INT8 量化模型
+            for priority_dir, label in [
+                (quant_dir, "ONNX Runtime + INT8 量化"),
+                (onnx_dir, "ONNX Runtime FP32"),
+            ]:
+                cand_file = os.path.join(priority_dir, "model_quantized.onnx")
+                if not os.path.isfile(cand_file):
+                    cand_file = os.path.join(priority_dir, "model.onnx")
+                if os.path.isfile(cand_file):
+                    backend = "onnx_int8" if "INT8" in label else "onnx_fp32"
+                    logger.info("Cross-Encoder 后端: %s", label)
+                    return (
+                        ort.InferenceSession(
+                            cand_file, sess_opt, providers=["CPUExecutionProvider"]
+                        ),
+                        backend,
+                    )
+
+        except ImportError:
+            logger.warning("onnxruntime 未安装，回退到 PyTorch")
+        except Exception as exc:
+            logger.warning("ONNX 加载失败 (%s)，回退到 PyTorch", exc)
+
+        # ── Level 1: PyTorch CPU 优化 ──
+        logger.info("Cross-Encoder 后端: PyTorch (CPU 线程优化)")
+        torch.set_num_threads(os.cpu_count() or 4)
+        model = AutoModelForSequenceClassification.from_pretrained(model_path)
+        model.eval()
+        return model, "pytorch"
 
     def _rrf_fusion(
         self, vector_results: list[str], bm25_results: list[str], k: int = 60
@@ -116,7 +164,6 @@ class MiemieMilvusRetriever:
         Returns:
             按加权组合分数降序排列的文本列表
         """
-        # 归一化各路的原始分数
         dense_texts = [t for t, _ in dense_results]
         dense_scores = self._minmax_normalize([s for _, s in dense_results])
         bm25_texts = [t for t, _ in bm25_results]
@@ -139,11 +186,35 @@ class MiemieMilvusRetriever:
             return []
 
         pairs = [[query, cand] for cand in candidates]
+        t0 = time.time()
+
         with torch.no_grad():
             inputs = self.rerank_tokenizer(
-                pairs, padding=True, truncation=True, return_tensors="pt", max_length=512
+                pairs, padding=True, truncation=True, return_tensors="pt", max_length=256
             )
-            scores = self.rerank_model(**inputs).logits.view(-1).float().tolist()
+
+            if self._reranker_backend.startswith("onnx"):
+                # ONNX Runtime：转为 numpy dict 后推理
+                ort_inputs = {
+                    k: v.cpu().numpy() for k, v in inputs.items()
+                }
+                logits = self.rerank_model.run(None, ort_inputs)[0]
+                scores = logits.reshape(-1).tolist()
+            else:
+                # PyTorch
+                scores = (
+                    self.rerank_model(**inputs)
+                    .logits.view(-1)
+                    .float()
+                    .tolist()
+                )
+
+        logger.debug(
+            "Cross-Encoder 重排耗时: %.1fms | 候选数=%d | 后端=%s",
+            (time.time() - t0) * 1000,
+            len(candidates),
+            self._reranker_backend,
+        )
 
         ranked = [cand for _, cand in sorted(zip(scores, candidates), reverse=True)]
         return ranked[:top_n]

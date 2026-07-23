@@ -1,10 +1,12 @@
 # Miemie-Agent-RAG/tests/evaluate_report.py
 import asyncio
+import json
 import logging
 import os
 import re
 import sys
 import time
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 from dotenv import load_dotenv
@@ -27,6 +29,11 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("miemie-rag.eval")
+
+# ── 结果保存目录 ────────────────────────────────────
+
+RESULTS_DIR = os.path.join(CURRENT_DIR, "results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # ── 初始化 ──────────────────────────────────────────
 
@@ -105,6 +112,180 @@ def calculate_bootstrap_ci(data, n_bootstraps=1000, ci_level=0.95):
     return mean, lower, upper
 
 
+# ── 结果持久化 ──────────────────────────────────────
+
+def _build_aggregate_stats(scores: list[float], durations: list[float]) -> dict:
+    """根据得分和延迟列表构建聚合统计字典"""
+    stats = {}
+    if scores:
+        mean_s, lower_s, upper_s = calculate_bootstrap_ci(scores)
+        stats["mean_score"] = round(mean_s, 2)
+        stats["bootstrap_ci_95"] = [round(lower_s, 2), round(upper_s, 2)]
+        stats["score_std"] = round(float(np.std(scores)), 2)
+        stats["score_min"] = round(float(np.min(scores)), 2)
+        stats["score_max"] = round(float(np.max(scores)), 2)
+    if durations:
+        stats["p50_latency_s"] = round(float(np.percentile(durations, 50)), 2)
+        stats["p99_latency_s"] = round(float(np.percentile(durations, 99)), 2)
+        stats["mean_latency_s"] = round(float(np.mean(durations)), 2)
+    return stats
+
+
+def _save_results(
+    filename_stem: str,
+    results: dict,
+    metadata: dict | None = None,
+) -> str:
+    """保存评测结果到 tests/results/，同时输出 JSON 和 Markdown。
+
+    Args:
+        filename_stem: 文件名主干（不含扩展名），例如 "production_eval_20260722_143000"
+        results: 结果数据（dict / list）
+        metadata: 附加到 JSON 根部的元信息
+
+    Returns:
+        JSON 文件的路径
+    """
+    # ── JSON ──
+    json_path = os.path.join(RESULTS_DIR, f"{filename_stem}.json")
+    payload: dict = {"_metadata": metadata or {}, "results": results}
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    logger.info("评测结果已保存 → %s", json_path)
+
+    # ── Markdown ──
+    md_path = os.path.join(RESULTS_DIR, f"{filename_stem}.md")
+    _write_markdown_report(md_path, filename_stem, results, metadata or {})
+    logger.info("评测报告已保存 → %s", md_path)
+
+    return json_path
+
+
+def _write_markdown_report(
+    md_path: str,
+    filename_stem: str,
+    results: dict | list,
+    metadata: dict,
+) -> None:
+    """根据 results 结构自动选择报告格式写入 Markdown"""
+    if isinstance(results, dict) and all(
+        isinstance(v, dict) and "scores" in v for v in results.values()
+    ):
+        _write_comparison_md(md_path, filename_stem, results, metadata)
+    else:
+        _write_production_md(md_path, filename_stem, results, metadata)
+
+
+def _write_production_md(
+    md_path: str, filename_stem: str, results: list, metadata: dict
+) -> None:
+    """单配置评测 Markdown 报告"""
+    scores = [r["score"] for r in results]
+    durations = [r["duration_s"] for r in results]
+    stats = _build_aggregate_stats(scores, durations)
+
+    lines = [
+        f"# RAG 质量评测报告",
+        f"",
+        f"**运行时间**: {metadata.get('timestamp', 'N/A')}",
+        f"**测试集规模**: n={len(results)}",
+        f"",
+        f"## 聚合统计",
+        f"",
+        f"| 指标 | 数值 |",
+        f"|---|---|",
+        f"| 平均得分 | {stats.get('mean_score', 'N/A')} / 10.0 |",
+        f"| Bootstrap 95% CI | {stats.get('bootstrap_ci_95', 'N/A')} |",
+        f"| 得分标准差 | {stats.get('score_std', 'N/A')} |",
+        f"| 得分范围 | {stats.get('score_min', 'N/A')} – {stats.get('score_max', 'N/A')} |",
+        f"| P50 延迟 | {stats.get('p50_latency_s', 'N/A')}s |",
+        f"| P99 延迟 | {stats.get('p99_latency_s', 'N/A')}s |",
+        f"| 平均延迟 | {stats.get('mean_latency_s', 'N/A')}s |",
+        f"",
+        f"## 逐题详情",
+        f"",
+        f"| # | 问题 | 得分 | 耗时(s) |",
+        f"|---|---|---|---|",
+    ]
+    for i, r in enumerate(results, 1):
+        task_short = r.get("task", "")[:60]
+        lines.append(f"| {i} | {task_short} | {r.get('score', 0):.1f} | {r.get('duration_s', 0):.1f} |")
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def _write_comparison_md(
+    md_path: str, filename_stem: str, results: dict, metadata: dict
+) -> None:
+    """融合策略对比评测 Markdown 报告"""
+    labels = list(results.keys())
+    n_questions = len(results[labels[0]]["per_q"])
+
+    lines = [
+        f"# RAG 融合策略对比评测报告",
+        f"",
+        f"**运行时间**: {metadata.get('timestamp', 'N/A')}",
+        f"**测试集规模**: n={n_questions}",
+        f"**对比配置**: {', '.join(labels)}",
+        f"",
+        f"## 综合排名",
+        f"",
+        f"| 排名 | 配置 | 平均得分 |",
+        f"|---|---|---|",
+    ]
+    ranked = sorted(labels, key=lambda lb: np.mean(results[lb]["scores"]), reverse=True)
+    for rank, label in enumerate(ranked, 1):
+        mean_s = np.mean(results[label]["scores"])
+        marker = "👑" if rank == 1 else ""
+        lines.append(f"| {marker} #{rank} | {label} | {mean_s:.2f} |")
+
+    lines += [
+        "",
+        "## 聚合统计",
+        "",
+    ]
+    col_labels = ["指标"] + labels
+    lines.append("| " + " | ".join(col_labels) + " |")
+    lines.append("|" + "|".join(["---"] * len(col_labels)) + "|")
+
+    for metric_name in ["mean_score", "bootstrap_ci_95", "score_std",
+                        "p50_latency_s", "p99_latency_s", "mean_latency_s"]:
+        row = [metric_name]
+        for label in labels:
+            s = results[label]["scores"]
+            d = results[label]["durations"]
+            stats = _build_aggregate_stats(s, d)
+            val = stats.get(metric_name, "N/A")
+            if isinstance(val, list):
+                val = f"[{val[0]}, {val[1]}]"
+            row.append(str(val))
+        lines.append("| " + " | ".join(row) + " |")
+
+    lines += [
+        "",
+        "## 逐样本得分",
+        "",
+    ]
+    header = "| # |" + "|".join(f" {l} " for l in labels) + "|"
+    lines.append(header)
+    lines.append("|" + "|".join(["---"] * (len(labels) + 1)) + "|")
+    for i in range(n_questions):
+        cells = [str(i + 1)]
+        for label in labels:
+            item = results[label]["per_q"][i]
+            # 兼容元组和 dict 两种格式
+            if isinstance(item, dict):
+                cells.append(f" {item['score']:.2f} ")
+            else:
+                _, score, _ = item
+                cells.append(f" {score:.2f} ")
+        lines.append("| " + " | ".join(cells) + " |")
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
 # ── 评测主流程 ──────────────────────────────────────
 
 async def run_comparison_eval():
@@ -146,19 +327,48 @@ async def run_comparison_eval():
                 final_answer = agent_res.get("answer", "")
                 score = await llm_judge_score(task, final_answer)
                 scores.append(score)
-                per_q.append((task[:40], score, duration))
+                per_q.append((task[:60], score, round(duration, 2)))
 
                 logger.info("  耗时: %.2fs | 得分: %.1f/10.0", duration, score)
             except Exception as e:
                 logger.error("样本 %d 异常: %s", i + 1, e)
                 scores.append(0.0)
                 durations.append(0.0)
-                per_q.append((task[:40], 0.0, 0.0))
+                per_q.append((task[:60], 0.0, 0.0))
 
         results[label] = {"scores": scores, "durations": durations, "per_q": per_q}
 
     # ── 输出对比报告 ──────────────────────────────────
     _print_comparison_report(results)
+
+    # ── 持久化保存 ──────────────────────────────────
+    tz_utc8 = timezone(timedelta(hours=8))
+    timestamp = datetime.now(tz_utc8).strftime("%Y%m%d_%H%M%S")
+    stem = f"comparison_eval_{timestamp}"
+
+    # 将 per_q 元组转为可序列化的 dict
+    serializable_results: dict[str, dict] = {}
+    for label, data in results.items():
+        serializable_results[label] = {
+            "scores": [round(s, 2) for s in data["scores"]],
+            "durations": [round(d, 2) for d in data["durations"]],
+            "per_q": [
+                {"task": task, "score": round(score, 2), "duration_s": round(dur, 2)}
+                for task, score, dur in data["per_q"]
+            ],
+            "stats": _build_aggregate_stats(data["scores"], data["durations"]),
+        }
+
+    _save_results(
+        stem,
+        results=serializable_results,
+        metadata={
+            "timestamp": timestamp,
+            "n_questions": len(TEST_DATASET),
+            "configs": [c[0] for c in configs],
+            "judge_model": "deepseek-chat",
+        },
+    )
 
 
 def _print_comparison_report(results: dict[str, dict]):
@@ -246,6 +456,7 @@ async def run_production_eval():
     logger.info("启动 RAG 质量评测")
     scores = []
     durations = []
+    per_question: list[dict] = []
 
     for i, task in enumerate(TEST_DATASET):
         logger.info("评测样本 [%d/%d]: %.30s...", i + 1, len(TEST_DATASET), task)
@@ -260,11 +471,18 @@ async def run_production_eval():
             score = await llm_judge_score(task, final_answer)
             scores.append(score)
 
+            per_question.append({
+                "task": task,
+                "score": round(score, 2),
+                "duration_s": round(duration, 2),
+            })
+
             logger.info(
                 "  耗时: %.2fs | 得分: %.1f/10.0", duration, score
             )
         except Exception as e:
             logger.error("样本 %d 异常: %s", i + 1, e)
+            per_question.append({"task": task, "score": 0.0, "duration_s": 0.0})
 
     if scores:
         mean_s, lower_s, upper_s = calculate_bootstrap_ci(scores)
@@ -278,6 +496,19 @@ async def run_production_eval():
             print(f"  P50 延迟:         {p50:.2f}s")
             print(f"  P99 延迟:         {p99:.2f}s")
         print("=" * 55)
+
+        tz_utc8 = timezone(timedelta(hours=8))
+        timestamp = datetime.now(tz_utc8).strftime("%Y%m%d_%H%M%S")
+        stem = f"production_eval_{timestamp}"
+        _save_results(
+            stem,
+            results=per_question,
+            metadata={
+                "timestamp": timestamp,
+                "n_questions": len(TEST_DATASET),
+                "model": "deepseek-chat",
+            },
+        )
 
 
 if __name__ == "__main__":

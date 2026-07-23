@@ -78,10 +78,16 @@ def generate_node(state: GraphState):
 
     try:
         response = _get_llm().invoke(llm_messages)
-        return {"answer": response.content}
+        answer = response.content
     except Exception as e:
         logger.error(f"DeepSeek API 调用异常: {e}")
-        return {"answer": "【系统提示】大模型服务暂时不可用，请稍后重试。"}
+        answer = "【系统提示】大模型服务暂时不可用，请稍后重试。"
+
+    # 将本轮 Q&A 追加到历史消息，供 checkpointer 持久化
+    history = list(state.get("messages") or [])
+    history.append({"role": "user", "content": state["question"]})
+    history.append({"role": "assistant", "content": answer})
+    return {"answer": answer, "messages": history}
 
 
 async def generate_node_stream(state: GraphState):
@@ -104,4 +110,11 @@ async def generate_node_stream(state: GraphState):
             yield {"answer": full_answer}
     except Exception as e:
         logger.error(f"DeepSeek API 流式调用异常: {e}")
-        yield {"answer": "【系统提示】大模型服务暂时不可用，请稍后重试。"}
+        full_answer = "【系统提示】大模型服务暂时不可用，请稍后重试。"
+        yield {"answer": full_answer}
+
+    # 流结束后，将本轮 Q&A 追加到消息历史
+    history = list(state.get("messages") or [])
+    history.append({"role": "user", "content": state["question"]})
+    history.append({"role": "assistant", "content": full_answer})
+    yield {"answer": full_answer, "messages": history}

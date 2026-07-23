@@ -65,6 +65,14 @@ models/
 logs/
 
 # ======================
+# Eval results
+# ======================
+tests/results/
+checkpoints.db
+checkpoints.db-wal
+checkpoints.db-shm
+
+# ======================
 # OS
 # ======================
 Thumbs.db
