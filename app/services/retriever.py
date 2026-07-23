@@ -25,14 +25,14 @@ class MiemieMilvusRetriever:
     """多路混合检索 + Cross-Encoder 精排的检索器
 
     检索管线：Dense 向量搜索 + BM25 稀疏检索 → 线性加权融合 → Cross-Encoder 重排
-    默认 fusion_method="linear_weighted", fusion_alpha=0.5
+    默认 fusion_method="linear_weighted", fusion_alpha=0.6（10 配置消融最优）
     """
 
     def __init__(
         self,
         collection_name: str = "miemie_knowledge_base",
         fusion_method: str = "linear_weighted",
-        fusion_alpha: float = 0.5,
+        fusion_alpha: float = 0.6,
     ):
         if fusion_method not in ("rrf", "linear_weighted"):
             raise ValueError(

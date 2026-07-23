@@ -294,9 +294,15 @@ async def run_comparison_eval():
 
     configs = [
         ("RRF (k=60)", "rrf", None),
+        ("Linear α=0.1 (BM25 为主)", "linear_weighted", 0.1),
+        ("Linear α=0.2", "linear_weighted", 0.2),
         ("Linear α=0.3 (BM25 偏重)", "linear_weighted", 0.3),
+        ("Linear α=0.4", "linear_weighted", 0.4),
         ("Linear α=0.5 (等权)", "linear_weighted", 0.5),
+        ("Linear α=0.6", "linear_weighted", 0.6),
         ("Linear α=0.7 (Dense 偏重)", "linear_weighted", 0.7),
+        ("Linear α=0.8", "linear_weighted", 0.8),
+        ("Linear α=0.9 (Dense 为主)", "linear_weighted", 0.9),
     ]
 
     results: dict[str, dict] = {}
@@ -426,7 +432,7 @@ def _print_comparison_report(results: dict[str, dict]):
     ranked = sorted(labels, key=lambda lb: np.mean(results[lb]["scores"]), reverse=True)
     for rank, label in enumerate(ranked, 1):
         mean_s = np.mean(results[label]["scores"])
-        marker = "👑" if rank == 1 else "  "
+        marker = "[BEST]" if rank == 1 else "     "
         print(f"  {marker} #{rank}  {label:<35s}  {mean_s:.2f}")
 
     # ── 结论 ──
