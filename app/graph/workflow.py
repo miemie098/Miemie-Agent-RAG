@@ -21,8 +21,9 @@ def create_workflow(streaming: bool = True, checkpointer=None):
 
     Args:
         streaming: True 使用流式生成节点，False 使用同步节点。
-        checkpointer: 可选，LangGraph Checkpointer 实例（如 SqliteSaver），
+        checkpointer: 可选，LangGraph Checkpointer 实例（如 SqliteSaver / PostgresSaver），
                       用于跨请求持久化对话状态。传入后可通过 thread_id 恢复会话。
+                      生产环境推荐 AsyncPostgresSaver + 集中式 PostgreSQL。
     """
     workflow = StateGraph(GraphState)
 

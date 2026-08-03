@@ -1,8 +1,15 @@
 # Miemie-Agent-RAG Kubernetes 部署清单
 # ==========================================
-# ⚠️ 部署前必须先创建 Secret:
+# ⚠️ 部署前必须先创建 Secrets:
 #   kubectl create secret generic miemie-rag-secrets \
-#     --from-literal=DEEPSEEK_API_KEY=<你的真实Key>
+#     --from-literal=DEEPSEEK_API_KEY=<你的真实Key> \
+#     --from-literal=DATABASE_URL=<PostgreSQL 连接串>
+#
+# PostgreSQL 连接串格式:
+#   postgresql://<user>:<password>@<host>:5432/<dbname>
+#   或带 SSL: postgresql://<user>:<password>@<host>:5432/<dbname>?sslmode=require
+#
+# 如果未设置 DATABASE_URL，系统自动回退到本地 SQLite（不适合多副本）
 # ==========================================
 
 ---
@@ -14,8 +21,11 @@ metadata:
     app: miemie-rag
 type: Opaque
 stringData:
-  # ⚠️ 部署前替换为真实 Key，或通过 kubectl create secret 命令注入
+  # ⚠️ 部署前替换为真实值，或通过 kubectl create secret 命令注入
+
+
   DEEPSEEK_API_KEY: "your-deepseek-api-key-here"
+  DATABASE_URL: "postgresql://miemie_user:changeme@postgres-service:5432/miemie_rag"
 
 ---
 apiVersion: apps/v1
@@ -45,6 +55,11 @@ spec:
             secretKeyRef:
               name: miemie-rag-secrets
               key: DEEPSEEK_API_KEY
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: miemie-rag-secrets
+              key: DATABASE_URL
         # 资源限制
         resources:
           requests:
@@ -66,6 +81,73 @@ spec:
             port: 8000
           initialDelaySeconds: 30
           periodSeconds: 10
+
+---
+# ==========================================
+# PostgreSQL Service（可选：K8s 内自建 PostgreSQL）
+# ==========================================
+# 生产环境推荐使用云原生托管 PostgreSQL（如阿里云 RDS / AWS RDS / GCP Cloud SQL），
+# 并将连接串填入上方 miemie-rag-secrets 的 DATABASE_URL。
+#
+# 如需在集群内自建 PostgreSQL 用于测试，取消下方注释并修改凭证：
+#
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: postgres-secrets
+# type: Opaque
+# stringData:
+#   POSTGRES_USER: miemie_user
+#   POSTGRES_PASSWORD: changeme
+#   POSTGRES_DB: miemie_rag
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: postgres-service
+# spec:
+#   selector:
+#     app: postgres
+#   ports:
+#     - port: 5432
+#       targetPort: 5432
+# ---
+# apiVersion: apps/v1
+# kind: StatefulSet
+# metadata:
+#   name: postgres
+# spec:
+#   serviceName: postgres-service
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: postgres
+#   template:
+#     metadata:
+#       labels:
+#         app: postgres
+#     spec:
+#       containers:
+#       - name: postgres
+#         image: pgvector/pgvector:pg16  # 含 pgvector 扩展，可用于未来向量检索迁移
+#         ports:
+#         - containerPort: 5432
+#         envFrom:
+#         - secretRef:
+#             name: postgres-secrets
+#         volumeMounts:
+#         - name: postgres-data
+#           mountPath: /var/lib/postgresql/data
+#   volumeClaimTemplates:
+#   - metadata:
+#       name: postgres-data
+#     spec:
+#       accessModes: ["ReadWriteOnce"]
+#       resources:
+#         requests:
+#           storage: 20Gi
+# ==========================================
 
 ---
 apiVersion: v1

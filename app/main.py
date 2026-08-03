@@ -14,7 +14,6 @@ load_dotenv()
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse, StreamingResponse
-from langgraph.checkpoint.sqlite import SqliteSaver
 from app.graph.workflow import create_workflow
 from app.services.retriever import get_milvus_retriever
 
@@ -43,11 +42,103 @@ class ChatResponse(BaseModel):
     thread_id: str
 
 
+# ── Checkpointer 初始化 ──────────────────────────────
+# 模块级变量，在 lifespan 中赋值，供路由函数使用
+_rag_workflow = None
+_checkpointer_ctx = None  # context manager，用于 shutdown 清理
+
+
+def _get_workflow():
+    """获取已编译的 RAG 工作流（仅在 lifespan 完成后有效）"""
+    assert _rag_workflow is not None, "工作流尚未初始化，请等待服务就绪"
+    return _rag_workflow
+
+
+def _init_checkpointer_sqlite():
+    """初始化本地 SQLite Checkpointer（开发/单机模式）
+
+    Returns:
+        (checkpointer, context_manager) — checkpointer 是 BaseCheckpointSaver 实例，
+        context_manager 用于应用关闭时清理资源。
+    """
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    db_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints.db"
+    )
+    logger.info("使用 SqliteSaver（本地会话状态: %s）", db_path)
+    ctx = SqliteSaver.from_conn_string(db_path)
+    return ctx.__enter__(), ctx
+
+
+async def _init_checkpointer_postgres(database_url: str):
+    """初始化 PostgreSQL Checkpointer（生产/多副本模式）
+
+    使用 AsyncPostgresSaver 配合 FastAPI 异步上下文，
+    通过集中式 PostgreSQL 实现跨 Pod 的会话状态共享。
+
+    Returns:
+        (checkpointer, context_manager)
+    """
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    logger.info("使用 AsyncPostgresSaver（集中式会话状态 → %s）",
+                _mask_connection_string(database_url))
+    ctx = AsyncPostgresSaver.from_conn_string(database_url)
+    checkpointer = await ctx.__aenter__()
+    await checkpointer.setup()
+    return checkpointer, ctx
+
+
+def _mask_connection_string(url: str) -> str:
+    """隐藏数据库连接串中的密码部分，用于日志输出"""
+    import re
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:****@", url)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """应用生命周期管理
+
+    启动阶段：
+      1. 按 DATABASE_URL 环境变量选择 Checkpointer（Postgres / SQLite）
+      2. 编译并缓存 LangGraph 工作流
+      3. 预热 Embedding 模型与向量库
+
+    关闭阶段：
+      1. 退出 Checkpointer context manager，释放连接池
+    """
+    global _rag_workflow, _checkpointer_ctx
+
     is_uvicorn_cmd = any("uvicorn" in arg.lower() for arg in sys.argv)
     is_reloader_main_process = is_uvicorn_cmd and os.getenv("UVICORN_LOOP") is None
 
+    # ── 1. 初始化 Checkpointer ──
+    database_url = os.getenv("DATABASE_URL")
+    checkpointer = None
+    _checkpointer_ctx = None
+
+    if database_url:
+        try:
+            checkpointer, _checkpointer_ctx = await _init_checkpointer_postgres(database_url)
+        except ImportError:
+            logger.warning(
+                "DATABASE_URL 已设置但 langgraph-checkpoint-postgres 未安装，"
+                "回退到 SqliteSaver"
+            )
+        except Exception as exc:
+            logger.error(
+                "PostgresSaver 初始化失败 (%s)，回退到 SqliteSaver", exc
+            )
+
+    if checkpointer is None:
+        checkpointer, _checkpointer_ctx = _init_checkpointer_sqlite()
+
+    # ── 2. 编译工作流 ──
+    _rag_workflow = create_workflow(checkpointer=checkpointer)
+    logger.info("LangGraph 工作流编译完成")
+
+    # ── 3. 预热 ──
     if not is_reloader_main_process:
         logger.info("正在预热：加载 Embedding 模型与向量库...")
         get_milvus_retriever()
@@ -56,7 +147,18 @@ async def lifespan(app: FastAPI):
         logger.debug("Uvicorn reloader 主进程，跳过预热")
 
     yield
+
+    # ── 关闭阶段 ──
     logger.info("服务正在关闭...")
+    if _checkpointer_ctx is not None:
+        try:
+            if hasattr(_checkpointer_ctx, "__aexit__"):
+                await _checkpointer_ctx.__aexit__(None, None, None)
+            else:
+                _checkpointer_ctx.__exit__(None, None, None)
+            logger.info("Checkpointer 资源已释放")
+        except Exception as exc:
+            logger.warning("Checkpointer 关闭时出现异常: %s", exc)
 
 
 app = FastAPI(
@@ -65,12 +167,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-
-# 启动时初始化 checkpointer，用于跨请求持久化会话状态
-_checkpointer = SqliteSaver.from_conn_string(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints.db")
-)
-rag_workflow = create_workflow(checkpointer=_checkpointer)
 
 
 # ── 路由 ──────────────────────────────────────────────
@@ -92,11 +188,12 @@ async def chat_endpoint(request: ChatRequest):
 
     传入 thread_id 可恢复历史会话；不传则自动生成并返回新的 thread_id。
     """
+    workflow = _get_workflow()
     thread_id = request.thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
     # 如果已有 checkpoint，用服务端消息历史覆盖客户端传入的 messages
-    checkpoint = rag_workflow.get_state(config)
+    checkpoint = workflow.get_state(config)
     checkpoint_messages = (
         checkpoint.values.get("messages", [])
         if checkpoint and checkpoint.values
@@ -109,7 +206,7 @@ async def chat_endpoint(request: ChatRequest):
         "context": "",
         "answer": "",
     }
-    result = await rag_workflow.ainvoke(state_input, config)
+    result = await workflow.ainvoke(state_input, config)
     return ChatResponse(answer=result.get("answer", ""), thread_id=thread_id)
 
 
@@ -119,11 +216,12 @@ async def chat_stream_endpoint(request: ChatRequest):
 
     传入 thread_id 可恢复历史会话；不传则自动生成并返回新的 thread_id。
     """
+    workflow = _get_workflow()
     thread_id = request.thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
     # 如果已有 checkpoint，用服务端消息历史
-    checkpoint = rag_workflow.get_state(config)
+    checkpoint = workflow.get_state(config)
     checkpoint_messages = (
         checkpoint.values.get("messages", [])
         if checkpoint and checkpoint.values
@@ -138,7 +236,7 @@ async def chat_stream_endpoint(request: ChatRequest):
             "answer": "",
         }
         prev_len = 0
-        async for chunk in rag_workflow.astream(state_input, config):
+        async for chunk in workflow.astream(state_input, config):
             if "generate" in chunk and "answer" in chunk["generate"]:
                 full = chunk["generate"]["answer"]
                 delta = full[prev_len:]
