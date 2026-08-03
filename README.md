@@ -33,7 +33,7 @@ flowchart LR
 | **融合策略** | 支持 RRF 与线性加权融合（α 可配）；10 配置消融实验显示 α=0.6 帕累托最优（7.86 分，P50=17.8s） |
 | **Cross-Encoder 精排** | BGE-Reranker-Large，ONNX Runtime + INT8 动态量化加速（35s → 6.7s） |
 | **流式输出** | SSE（Server-Sent Events）协议，token 级实时推送 |
-| **会话管理** | thread_id + SqliteSaver checkpointer，服务端持久化多轮对话历史 |
+| **会话管理** | thread_id + Checkpointer（PostgreSQL 集中式 / SQLite 本地），服务端持久化多轮对话历史 |
 | **滑动窗口** | 自动裁剪最近 5 轮历史送入 LLM，防止上下文溢出 |
 | **单例架构** | LLM 客户端与检索器全局复用，避免高并发下重复初始化 |
 | **优雅降级** | LLM 调用失败时返回提示而非 500 错误 |
@@ -52,7 +52,7 @@ flowchart LR
 | 稀疏检索 | BM25Okapi (rank-bm25) |
 | 精排模型 | BAAI/bge-reranker-large（ONNX Runtime + INT8 量化） |
 | 推理加速 | ONNX Runtime 1.23, INT8 动态量化 |
-| 会话持久化 | SqliteSaver (LangGraph Checkpointer) |
+| 会话持久化 | AsyncPostgresSaver (生产) / SqliteSaver (本地开发) |
 | 压测 | Locust |
 | 容器编排 | Docker + Kubernetes |
 
